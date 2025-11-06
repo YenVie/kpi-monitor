@@ -1,0 +1,45 @@
+# Python cach
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Data files - KHÔNG commit vào git (quá lớn)
+*.csv
+*.xlsx
+*.xls
+*.pdf
+
+# Output files tự động tạo
+charts/
+reports/
+logs/
+alerts/*.json
+
+# Backup folder
+backup/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables
+.env
+.env.local
+
