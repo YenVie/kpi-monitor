@@ -4,6 +4,9 @@ SCRIPT PHÂN TÍCH TỔNG QUÁT: Bất kỳ tỉnh nào và KPI nào
 Cho phép phân tích suy giảm cho bất kỳ tỉnh và KPI nào
 
 Sử dụng Git để quản lý phiên bản code.
+Version: 1.0
+
+[TẠO THAY ĐỔI ĐỂ THỰC HÀNH GIT] - Bạn có thể xóa dòng này sau khi học xong
 """
 
 import pandas as pd
