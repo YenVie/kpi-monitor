@@ -16,6 +16,7 @@ import os
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib
+from matplotlib.dates import DayLocator, DateFormatter
 matplotlib.use('Agg')  # Backend cho Streamlit
 
 # Import các module hiện có
@@ -66,6 +67,23 @@ uploaded_file = st.sidebar.file_uploader(
     help="Upload file CSV chứa dữ liệu KPI",
     key="csv_uploader"
 )
+
+# Khởi tạo detector với cache nhưng có thể clear (ĐỊNH NGHĨA TRƯỚC)
+@st.cache_data(ttl=3600)  # Cache 1 giờ, nhưng có thể clear bằng button
+def load_data(file_path):
+    """Load và cache dữ liệu"""
+    detector = KPIDeclineDetector(file_path)
+    df = detector.load_and_clean_data()
+    
+    # Hiển thị thông tin dữ liệu
+    date_col = 'Ngay7'
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col], format='%d/%m/%Y', errors='coerce')
+        min_date = df[date_col].min()
+        max_date = df[date_col].max()
+        st.sidebar.info(f"📅 Khoảng thời gian: {min_date.strftime('%d/%m/%Y')} - {max_date.strftime('%d/%m/%Y')}")
+    
+    return detector, df
 
 # Lưu file path và hash để detect thay đổi
 file_path = None
@@ -125,23 +143,6 @@ if st.sidebar.button("🔄 Reload dữ liệu", help="Tải lại dữ liệu t�
     load_data.clear()
     st.sidebar.success("✅ Đã reload dữ liệu!")
     st.rerun()
-
-# Khởi tạo detector với cache nhưng có thể clear
-@st.cache_data(ttl=3600)  # Cache 1 giờ, nhưng có thể clear bằng button
-def load_data(file_path):
-    """Load và cache dữ liệu"""
-    detector = KPIDeclineDetector(file_path)
-    df = detector.load_and_clean_data()
-    
-    # Hiển thị thông tin dữ liệu
-    date_col = 'Ngay7'
-    if date_col in df.columns:
-        df[date_col] = pd.to_datetime(df[date_col], format='%d/%m/%Y', errors='coerce')
-        min_date = df[date_col].min()
-        max_date = df[date_col].max()
-        st.sidebar.info(f"📅 Khoảng thời gian: {min_date.strftime('%d/%m/%Y')} - {max_date.strftime('%d/%m/%Y')}")
-    
-    return detector, df
 
 try:
     detector, df = load_data(file_path)
@@ -227,12 +228,69 @@ with tab2:
             if matched_kpi:
                 kpi = st.selectbox("KPI tìm thấy", [matched_kpi] + candidates[:5])
     
+    # Lọc ngày - Tính năng loại bỏ ngày bị lỗi (giống như tab "Tất cả tỉnh")
+    st.subheader("🔧 Lọc ngày")
+    col_filter1, col_filter2 = st.columns(2)
+    
+    with col_filter1:
+        # Lấy danh sách ngày có dữ liệu
+        all_dates = sorted(df['Ngay7'].dropna().unique())
+        all_dates_str = [str(d) for d in all_dates]
+        
+        # Multi-select để chọn ngày cần loại bỏ
+        excluded_dates_province = st.multiselect(
+            "❌ Chọn ngày cần loại bỏ (ngày bị lỗi)",
+            options=all_dates_str,
+            help="Chọn các ngày có dữ liệu lỗi để loại bỏ khỏi biểu đồ",
+            default=[],
+            key="exclude_dates_province"
+        )
+    
+    with col_filter2:
+        # Chọn khoảng ngày để hiển thị (giống như tab "Tất cả tỉnh")
+        if len(all_dates) > 0:
+            # Convert dates for date_input
+            try:
+                date_min_prov = pd.to_datetime(all_dates[0], format='%d/%m/%Y', errors='coerce')
+                date_max_prov = pd.to_datetime(all_dates[-1], format='%d/%m/%Y', errors='coerce')
+                
+                if pd.notna(date_min_prov) and pd.notna(date_max_prov):
+                    date_range_province = st.date_input(
+                        "📅 Chọn khoảng ngày hiển thị",
+                        value=(date_min_prov.date(), date_max_prov.date()),
+                        min_value=date_min_prov.date(),
+                        max_value=date_max_prov.date(),
+                        help="Chọn khoảng ngày muốn xem trong biểu đồ",
+                        key="date_range_province"
+                    )
+                else:
+                    date_range_province = None
+            except:
+                date_range_province = None
+        else:
+            date_range_province = None
+    
     # Hiển thị biểu đồ ngay khi chọn tỉnh và KPI
     if province and kpi:
         province_data = df[df['CTKD7'] == province].copy()
         if len(province_data) > 0 and kpi in province_data.columns:
             kpi_data = province_data[['Ngay7', kpi]].copy()
             kpi_data = kpi_data[(kpi_data[kpi].notna()) & (kpi_data[kpi] != 0)]
+            
+            # Loại bỏ ngày được chọn
+            if excluded_dates_province:
+                kpi_data = kpi_data[~kpi_data['Ngay7'].isin(excluded_dates_province)]
+            
+            # Lọc theo khoảng ngày nếu có
+            if date_range_province and len(date_range_province) == 2:
+                kpi_data['Ngay7_dt'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                start_date_prov = pd.Timestamp(date_range_province[0])
+                end_date_prov = pd.Timestamp(date_range_province[1])
+                kpi_data = kpi_data[
+                    (kpi_data['Ngay7_dt'] >= start_date_prov) & 
+                    (kpi_data['Ngay7_dt'] <= end_date_prov)
+                ]
+                kpi_data = kpi_data.drop('Ngay7_dt', axis=1)
             
             if len(kpi_data) > 0:
                 st.subheader("📈 Biểu đồ xu hướng")
@@ -245,6 +303,10 @@ with tab2:
                 chart_data = kpi_data_display.set_index('Ngay7')[kpi].to_frame()
                 chart_data.columns = [f'{kpi} - {province}']
                 st.line_chart(chart_data)
+                
+                # Thông báo nếu có ngày bị loại bỏ
+                if excluded_dates_province:
+                    st.info(f"⚠️ Đã loại bỏ {len(excluded_dates_province)} ngày: {', '.join(excluded_dates_province[:5])}{'...' if len(excluded_dates_province) > 5 else ''}")
                 
                 # Thống kê nhanh
                 col1, col2, col3 = st.columns(3)
@@ -281,6 +343,21 @@ with tab2:
                     kpi_data = kpi_data.sort_values('Ngay7')
                     kpi_data = kpi_data[(kpi_data[kpi].notna()) & (kpi_data[kpi] != 0)]
                     
+                    # Loại bỏ ngày được chọn
+                    if excluded_dates_province:
+                        kpi_data = kpi_data[~kpi_data['Ngay7'].isin(excluded_dates_province)]
+                    
+                    # Lọc theo khoảng ngày nếu có
+                    if date_range_province and len(date_range_province) == 2:
+                        kpi_data['Ngay7_dt'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                        start_date_prov = pd.Timestamp(date_range_province[0])
+                        end_date_prov = pd.Timestamp(date_range_province[1])
+                        kpi_data = kpi_data[
+                            (kpi_data['Ngay7_dt'] >= start_date_prov) & 
+                            (kpi_data['Ngay7_dt'] <= end_date_prov)
+                        ]
+                        kpi_data = kpi_data.drop('Ngay7_dt', axis=1)
+                    
                     if len(kpi_data) > 0:
                         col1, col2, col3, col4 = st.columns(4)
                         with col1:
@@ -315,13 +392,29 @@ with tab2:
                         kpi_data = kpi_data.sort_values('Ngay7')
                         
                         # Tạo biểu đồ
-                        fig, ax = plt.subplots(figsize=(12, 6))
+                        fig, ax = plt.subplots(figsize=(14, 6))
                         ax.plot(kpi_data['Ngay7'], kpi_data[kpi], marker='o', linewidth=2, markersize=4)
                         ax.set_title(f'{kpi} - {matched_province}', fontsize=14, fontweight='bold')
                         ax.set_xlabel('Ngày', fontsize=12)
                         ax.set_ylabel(kpi, fontsize=12)
                         ax.grid(True, alpha=0.3)
+                        
+                        # Hiển thị tất cả các ngày trên trục x (bất kỳ khoảng ngày nào)
+                        ax.xaxis.set_major_locator(DayLocator(interval=1))  # Luôn hiển thị tất cả các ngày
+                        ax.xaxis.set_major_formatter(DateFormatter('%d/%m/%Y'))
                         ax.tick_params(axis='x', rotation=45)
+                        
+                        # Điều chỉnh layout để tránh nhãn bị cắt
+                        plt.setp(ax.xaxis.get_majorticklabels(), ha='right')
+                        
+                        # Tăng kích thước biểu đồ khi có nhiều ngày để hiển thị đầy đủ
+                        num_days = len(kpi_data)
+                        if num_days > 30:
+                            fig.set_size_inches(18, 6)
+                        elif num_days > 20:
+                            fig.set_size_inches(16, 6)
+                        else:
+                            fig.set_size_inches(14, 6)
                         
                         # Highlight lookback days
                         if lookback_days and len(kpi_data) >= lookback_days:
@@ -554,7 +647,32 @@ with tab3:
                         ax.set_ylabel(kpi_all, fontsize=12)
                         ax.grid(True, alpha=0.3)
                         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+                        
+                        # Hiển thị tất cả các ngày trên trục x (bất kỳ khoảng ngày nào)
+                        ax.xaxis.set_major_locator(DayLocator(interval=1))  # Luôn hiển thị tất cả các ngày
+                        ax.xaxis.set_major_formatter(DateFormatter('%d/%m/%Y'))
                         ax.tick_params(axis='x', rotation=45)
+                        plt.setp(ax.xaxis.get_majorticklabels(), ha='right')
+                        
+                        # Tính số ngày và tăng kích thước biểu đồ khi có nhiều ngày
+                        all_dates_in_chart = set()
+                        for province_name in provinces_with_issues:
+                            province_data_temp = df[df['CTKD7'] == province_name].copy()
+                            if len(province_data_temp) > 0 and kpi_all in province_data_temp.columns:
+                                kpi_data_temp = province_data_temp[['Ngay7', kpi_all]].copy()
+                                kpi_data_temp = kpi_data_temp[(kpi_data_temp[kpi_all].notna()) & (kpi_data_temp[kpi_all] != 0)]
+                                if excluded_dates:
+                                    kpi_data_temp = kpi_data_temp[~kpi_data_temp['Ngay7'].isin(excluded_dates)]
+                                all_dates_in_chart.update(kpi_data_temp['Ngay7'].unique())
+                        
+                        num_days = len(all_dates_in_chart)
+                        if num_days > 30:
+                            fig.set_size_inches(20, 8)
+                        elif num_days > 20:
+                            fig.set_size_inches(18, 8)
+                        else:
+                            fig.set_size_inches(16, 8)
+                        
                         plt.tight_layout()
                         st.pyplot(fig)
                         plt.close(fig)
