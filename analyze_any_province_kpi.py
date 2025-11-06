@@ -2,6 +2,8 @@
 SCRIPT PHÂN TÍCH TỔNG QUÁT: Bất kỳ tỉnh nào và KPI nào
 ======================================================
 Cho phép phân tích suy giảm cho bất kỳ tỉnh và KPI nào
+
+Sử dụng Git để quản lý phiên bản code.
 """
 
 import pandas as pd
