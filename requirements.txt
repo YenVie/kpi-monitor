@@ -3,6 +3,9 @@ numpy>=1.23.0
 matplotlib>=3.6.0
 seaborn>=0.12.0
 
+# Streamlit for web app
+streamlit>=1.28.0
+
 # Optional: For scheduling
 # schedule>=1.2.0
 

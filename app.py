@@ -1,0 +1,683 @@
+"""
+STREAMLIT WEB APP - GIÁM SÁT KPI
+=================================
+Chạy trên laptop local, không cần server riêng!
+
+Cách chạy:
+1. Cài đặt: pip install streamlit
+2. Chạy: streamlit run app.py
+3. Mở trình duyệt: http://localhost:8501
+"""
+
+import streamlit as st
+import pandas as pd
+import sys
+import os
+from datetime import datetime
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use('Agg')  # Backend cho Streamlit
+
+# Import các module hiện có
+try:
+    from kpi_decline_detection_pipeline import KPIDeclineDetector
+    from analyze_any_province_kpi import analyze_province_kpi, fuzzy_match_kpi
+except ImportError as e:
+    st.error(f"❌ Lỗi import: {e}")
+    st.stop()
+
+# Cấu hình trang
+st.set_page_config(
+    page_title="Giám sát KPI",
+    page_icon="📊",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
+
+# CSS tùy chỉnh
+st.markdown("""
+<style>
+    .main-header {
+        font-size: 2.5rem;
+        font-weight: bold;
+        color: #1f77b4;
+        text-align: center;
+        padding: 1rem 0;
+    }
+    .info-box {
+        background-color: #f0f2f6;
+        padding: 1rem;
+        border-radius: 0.5rem;
+        margin: 1rem 0;
+    }
+</style>
+""", unsafe_allow_html=True)
+
+# Header
+st.markdown('<div class="main-header">📊 HỆ THỐNG GIÁM SÁT KPI</div>', unsafe_allow_html=True)
+
+# Sidebar: Upload file và cấu hình
+st.sidebar.header("📁 Cấu hình")
+
+# Upload file CSV
+uploaded_file = st.sidebar.file_uploader(
+    "Chọn file CSV dữ liệu KPI",
+    type=['csv'],
+    help="Upload file CSV chứa dữ liệu KPI",
+    key="csv_uploader"
+)
+
+# Lưu file path và hash để detect thay đổi
+file_path = None
+file_changed = False
+
+if uploaded_file is not None:
+    # Lưu file upload vào thư mục hiện tại
+    file_path = '1.Ngày.csv'
+    
+    # Kiểm tra xem file có thay đổi không (dựa vào timestamp hoặc size)
+    file_changed = True
+    if os.path.exists(file_path):
+        old_size = os.path.getsize(file_path)
+        new_size = uploaded_file.size
+        if old_size != new_size:
+            file_changed = True
+        else:
+            # Kiểm tra nội dung (so sánh hash)
+            uploaded_file.seek(0)
+            new_content = uploaded_file.read()
+            uploaded_file.seek(0)
+            
+            with open(file_path, 'rb') as f:
+                old_content = f.read()
+            
+            if new_content != old_content:
+                file_changed = True
+    
+    # Lưu file mới
+    with open(file_path, 'wb') as f:
+        f.write(uploaded_file.getbuffer())
+    
+    st.sidebar.success(f"✅ Đã upload file thành công! ({uploaded_file.size:,} bytes)")
+    
+    # Hiển thị thông tin file
+    st.sidebar.info(f"📄 Tên file: {uploaded_file.name}")
+    
+    # Clear cache khi file mới được upload
+    if file_changed:
+        load_data.clear()
+        st.sidebar.success("🔄 Đã cập nhật dữ liệu mới!")
+elif os.path.exists('1.Ngày.csv'):
+    file_path = '1.Ngày.csv'
+    file_size = os.path.getsize(file_path)
+    st.sidebar.success(f"✅ Đang sử dụng file: 1.Ngày.csv ({file_size:,} bytes)")
+else:
+    st.sidebar.warning("⚠️ Chưa có file CSV. Vui lòng upload file.")
+    st.stop()
+
+# Cấu hình
+st.sidebar.subheader("⚙️ Cấu hình phân tích")
+lookback_days = st.sidebar.slider("Số ngày so sánh", 1, 30, 7)
+decline_threshold = st.sidebar.slider("Ngưỡng suy giảm (%)", 0.1, 10.0, 2.0, 0.1)
+
+# Nút reload data
+if st.sidebar.button("🔄 Reload dữ liệu", help="Tải lại dữ liệu từ file CSV"):
+    load_data.clear()
+    st.sidebar.success("✅ Đã reload dữ liệu!")
+    st.rerun()
+
+# Khởi tạo detector với cache nhưng có thể clear
+@st.cache_data(ttl=3600)  # Cache 1 giờ, nhưng có thể clear bằng button
+def load_data(file_path):
+    """Load và cache dữ liệu"""
+    detector = KPIDeclineDetector(file_path)
+    df = detector.load_and_clean_data()
+    
+    # Hiển thị thông tin dữ liệu
+    date_col = 'Ngay7'
+    if date_col in df.columns:
+        df[date_col] = pd.to_datetime(df[date_col], format='%d/%m/%Y', errors='coerce')
+        min_date = df[date_col].min()
+        max_date = df[date_col].max()
+        st.sidebar.info(f"📅 Khoảng thời gian: {min_date.strftime('%d/%m/%Y')} - {max_date.strftime('%d/%m/%Y')}")
+    
+    return detector, df
+
+try:
+    detector, df = load_data(file_path)
+    
+    # Hiển thị thông tin dữ liệu đã load
+    st.sidebar.info(f"📊 Số dòng: {len(df):,} | Số tỉnh: {len(df['CTKD7'].dropna().unique())}")
+    
+except Exception as e:
+    st.error(f"❌ Lỗi khi load dữ liệu: {str(e)}")
+    st.exception(e)
+    st.stop()
+
+# Tab chính
+tab1, tab2, tab3, tab4 = st.tabs([
+    "📊 Overview", 
+    "🔍 Phân tích tỉnh", 
+    "📈 Tất cả tỉnh", 
+    "🚨 Alerts"
+])
+
+# TAB 1: OVERVIEW
+with tab1:
+    st.header("📊 Tổng quan dữ liệu")
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Số tỉnh", len(df['CTKD7'].unique()))
+    
+    with col2:
+        st.metric("Số điểm dữ liệu", len(df))
+    
+    with col3:
+        date_range = pd.to_datetime(df['Ngay7']).max() - pd.to_datetime(df['Ngay7']).min()
+        st.metric("Khoảng thời gian", f"{date_range.days} ngày")
+    
+    with col4:
+        kpi_cols = [c for c in df.columns if any(k in c.upper() 
+                   for k in ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR'])]
+        st.metric("Số KPI", len(kpi_cols))
+    
+    # Hiển thị một phần dữ liệu
+    st.subheader("📋 Xem dữ liệu")
+    if st.checkbox("Hiển thị 10 dòng đầu"):
+        st.dataframe(df.head(10), use_container_width=True)
+
+# TAB 2: PHÂN TÍCH TỈNH
+with tab2:
+    st.header("🔍 Phân tích theo tỉnh và KPI")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        # Dropdown chọn tỉnh
+        provinces = sorted([p for p in df['CTKD7'].dropna().unique()])
+        province = st.selectbox(
+            "Chọn tỉnh",
+            provinces,
+            help="Chọn tỉnh cần phân tích"
+        )
+        
+        # Tìm kiếm tỉnh
+        search_province = st.text_input("🔍 Tìm kiếm tỉnh (nhập một phần tên)")
+        if search_province:
+            filtered_provinces = [p for p in provinces if search_province.lower() in str(p).lower()]
+            if filtered_provinces:
+                province = st.selectbox("Tỉnh tìm thấy", filtered_provinces)
+    
+    with col2:
+        # Dropdown chọn KPI
+        kpi_cols = [c for c in df.columns if any(k in c.upper() 
+                   for k in ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR'])]
+        kpi = st.selectbox(
+            "Chọn KPI",
+            kpi_cols,
+            help="Chọn KPI cần phân tích"
+        )
+        
+        # Tìm kiếm KPI
+        search_kpi = st.text_input("🔍 Tìm kiếm KPI (nhập một phần tên)")
+        if search_kpi:
+            matched_kpi, candidates = fuzzy_match_kpi(search_kpi, df.columns)
+            if matched_kpi:
+                kpi = st.selectbox("KPI tìm thấy", [matched_kpi] + candidates[:5])
+    
+    # Hiển thị biểu đồ ngay khi chọn tỉnh và KPI
+    if province and kpi:
+        province_data = df[df['CTKD7'] == province].copy()
+        if len(province_data) > 0 and kpi in province_data.columns:
+            kpi_data = province_data[['Ngay7', kpi]].copy()
+            kpi_data = kpi_data[(kpi_data[kpi].notna()) & (kpi_data[kpi] != 0)]
+            
+            if len(kpi_data) > 0:
+                st.subheader("📈 Biểu đồ xu hướng")
+                kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                kpi_data = kpi_data.sort_values('Ngay7')
+                
+                # Biểu đồ tương tác Streamlit
+                kpi_data_display = kpi_data.copy()
+                kpi_data_display['Ngay7'] = kpi_data_display['Ngay7'].dt.strftime('%Y-%m-%d')
+                chart_data = kpi_data_display.set_index('Ngay7')[kpi].to_frame()
+                chart_data.columns = [f'{kpi} - {province}']
+                st.line_chart(chart_data)
+                
+                # Thống kê nhanh
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Giá trị mới nhất", f"{kpi_data[kpi].iloc[-1]:.2f}")
+                with col2:
+                    st.metric("Trung bình", f"{kpi_data[kpi].mean():.2f}")
+                with col3:
+                    change_pct = ((kpi_data[kpi].iloc[-1] - kpi_data[kpi].iloc[0]) / kpi_data[kpi].iloc[0]) * 100
+                    st.metric("Thay đổi tổng", f"{change_pct:.2f}%")
+    
+    # Nút phân tích
+    if st.button("🚀 Phân tích chi tiết", type="primary", use_container_width=True):
+        with st.spinner("Đang phân tích..."):
+            try:
+                # Gọi hàm phân tích
+                result = analyze_province_kpi(
+                    province, 
+                    kpi, 
+                    file_path=file_path,
+                    lookback_days=lookback_days,
+                    decline_threshold=decline_threshold
+                )
+                
+                if result:
+                    detector_result, alerts, matched_province = result
+                    
+                    # Hiển thị kết quả
+                    st.success(f"✅ Phân tích hoàn thành cho {matched_province} - {kpi}")
+                    
+                    # Thống kê
+                    province_data = df[df['CTKD7'] == matched_province].copy()
+                    kpi_data = province_data[['Ngay7', kpi]].copy()
+                    kpi_data = kpi_data.sort_values('Ngay7')
+                    kpi_data = kpi_data[(kpi_data[kpi].notna()) & (kpi_data[kpi] != 0)]
+                    
+                    if len(kpi_data) > 0:
+                        col1, col2, col3, col4 = st.columns(4)
+                        with col1:
+                            st.metric("Min", f"{kpi_data[kpi].min():.2f}")
+                        with col2:
+                            st.metric("Max", f"{kpi_data[kpi].max():.2f}")
+                        with col3:
+                            st.metric("Trung bình", f"{kpi_data[kpi].mean():.2f}")
+                        with col4:
+                            st.metric("Giá trị mới nhất", f"{kpi_data[kpi].iloc[-1]:.2f}")
+                    
+                    # Hiển thị alerts nếu có
+                    if alerts:
+                        st.warning(f"⚠️ Phát hiện {len(alerts)} cảnh báo suy giảm:")
+                        for alert in alerts:
+                            st.error(f"""
+                            **Tỉnh**: {alert['province']}  
+                            **KPI**: {alert['kpi']}  
+                            **Ngày**: {alert['latest_date'].strftime('%d/%m/%Y')}  
+                            **Suy giảm**: {alert['decline_pct']:.2f}%  
+                            **Mức độ**: {alert['severity']}
+                            """)
+                    else:
+                        st.info("✅ Không phát hiện suy giảm mạnh")
+                    
+                    # Hiển thị biểu đồ
+                    st.subheader("📈 Biểu đồ xu hướng KPI")
+                    
+                    if len(kpi_data) > 0:
+                        # Chuẩn hóa ngày
+                        kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                        kpi_data = kpi_data.sort_values('Ngay7')
+                        
+                        # Tạo biểu đồ
+                        fig, ax = plt.subplots(figsize=(12, 6))
+                        ax.plot(kpi_data['Ngay7'], kpi_data[kpi], marker='o', linewidth=2, markersize=4)
+                        ax.set_title(f'{kpi} - {matched_province}', fontsize=14, fontweight='bold')
+                        ax.set_xlabel('Ngày', fontsize=12)
+                        ax.set_ylabel(kpi, fontsize=12)
+                        ax.grid(True, alpha=0.3)
+                        ax.tick_params(axis='x', rotation=45)
+                        
+                        # Highlight lookback days
+                        if lookback_days and len(kpi_data) >= lookback_days:
+                            latest_date = kpi_data['Ngay7'].iloc[-1]
+                            lookback_date = latest_date - pd.Timedelta(days=lookback_days)
+                            mask = kpi_data['Ngay7'] >= lookback_date
+                            ax.plot(kpi_data[mask]['Ngay7'], kpi_data[mask][kpi], 
+                                   marker='o', linewidth=3, markersize=6, 
+                                   color='red', label=f'{lookback_days} ngày gần nhất')
+                            ax.legend()
+                        
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close(fig)
+                        
+                        # Thêm biểu đồ tương tác bằng Streamlit
+                        st.subheader("📊 Biểu đồ tương tác")
+                        kpi_data_display = kpi_data.copy()
+                        kpi_data_display['Ngay7'] = kpi_data_display['Ngay7'].dt.strftime('%Y-%m-%d')
+                        st.line_chart(kpi_data_display.set_index('Ngay7')[kpi])
+                    else:
+                        st.warning("⚠️ Không có dữ liệu để vẽ biểu đồ")
+                        
+            except Exception as e:
+                st.error(f"❌ Lỗi khi phân tích: {str(e)}")
+                st.exception(e)
+
+# TAB 3: TẤT CẢ TỈNH
+with tab3:
+    st.header("📈 Phân tích tất cả tỉnh")
+    
+    # Chọn KPI
+    kpi_all = st.selectbox(
+        "Chọn KPI để phân tích cho tất cả tỉnh",
+        kpi_cols
+    )
+    
+    # Lọc ngày - Tính năng loại bỏ ngày bị lỗi
+    st.subheader("🔧 Lọc ngày")
+    col_filter1, col_filter2 = st.columns(2)
+    
+    with col_filter1:
+        # Lấy danh sách ngày có dữ liệu
+        all_dates = sorted(df['Ngay7'].dropna().unique())
+        all_dates_str = [str(d) for d in all_dates]
+        
+        # Multi-select để chọn ngày cần loại bỏ
+        excluded_dates = st.multiselect(
+            "❌ Chọn ngày cần loại bỏ (ngày bị lỗi)",
+            options=all_dates_str,
+            help="Chọn các ngày có dữ liệu lỗi để loại bỏ khỏi biểu đồ",
+            default=[]
+        )
+    
+    with col_filter2:
+        # Chọn khoảng ngày để hiển thị
+        if len(all_dates) > 0:
+            # Convert dates for date_input
+            try:
+                date_min = pd.to_datetime(all_dates[0], format='%d/%m/%Y', errors='coerce')
+                date_max = pd.to_datetime(all_dates[-1], format='%d/%m/%Y', errors='coerce')
+                
+                if pd.notna(date_min) and pd.notna(date_max):
+                    date_range = st.date_input(
+                        "📅 Chọn khoảng ngày hiển thị",
+                        value=(date_min.date(), date_max.date()),
+                        min_value=date_min.date(),
+                        max_value=date_max.date(),
+                        help="Chọn khoảng ngày muốn xem trong biểu đồ"
+                    )
+                else:
+                    date_range = None
+            except:
+                date_range = None
+        else:
+            date_range = None
+    
+    # Hiển thị biểu đồ tất cả tỉnh ngay khi chọn KPI
+    if kpi_all:
+        st.subheader("📊 Biểu đồ so sánh tất cả tỉnh")
+        
+        # Lấy dữ liệu cho tất cả tỉnh
+        all_provinces_data = []
+        provinces_list = sorted([p for p in df['CTKD7'].dropna().unique()])
+        
+        for province_name in provinces_list:
+            province_data = df[df['CTKD7'] == province_name].copy()
+            if len(province_data) > 0 and kpi_all in province_data.columns:
+                kpi_data = province_data[['Ngay7', kpi_all]].copy()
+                kpi_data = kpi_data[(kpi_data[kpi_all].notna()) & (kpi_data[kpi_all] != 0)]
+                
+                # Loại bỏ ngày được chọn
+                if excluded_dates:
+                    kpi_data = kpi_data[~kpi_data['Ngay7'].isin(excluded_dates)]
+                
+                # Lọc theo khoảng ngày nếu có
+                if date_range and len(date_range) == 2:
+                    kpi_data['Ngay7_dt'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                    start_date = pd.Timestamp(date_range[0])
+                    end_date = pd.Timestamp(date_range[1])
+                    kpi_data = kpi_data[
+                        (kpi_data['Ngay7_dt'] >= start_date) & 
+                        (kpi_data['Ngay7_dt'] <= end_date)
+                    ]
+                    kpi_data = kpi_data.drop('Ngay7_dt', axis=1)
+                
+                if len(kpi_data) > 0:
+                    kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                    kpi_data = kpi_data.sort_values('Ngay7')
+                    kpi_data['Tỉnh'] = province_name
+                    all_provinces_data.append(kpi_data[['Ngay7', kpi_all, 'Tỉnh']])
+        
+        if all_provinces_data:
+            # Tạo DataFrame tổng hợp
+            combined_df = pd.concat(all_provinces_data, ignore_index=True)
+            combined_df['Ngay7'] = combined_df['Ngay7'].dt.strftime('%Y-%m-%d')
+            
+            # Pivot để có mỗi tỉnh là một cột
+            pivot_df = combined_df.pivot_table(
+                index='Ngay7', 
+                columns='Tỉnh', 
+                values=kpi_all,
+                aggfunc='first'
+            )
+            
+            # Hiển thị biểu đồ bằng Streamlit
+            if len(pivot_df) > 0:
+                st.line_chart(pivot_df)
+                
+                # Thông báo nếu có ngày bị loại bỏ
+                if excluded_dates:
+                    st.info(f"⚠️ Đã loại bỏ {len(excluded_dates)} ngày: {', '.join(excluded_dates[:5])}{'...' if len(excluded_dates) > 5 else ''}")
+            else:
+                st.warning("⚠️ Không còn dữ liệu sau khi lọc. Vui lòng điều chỉnh bộ lọc.")
+            
+            # Thống kê nhanh
+            st.subheader("📊 Thống kê nhanh")
+            stats_cols = st.columns(min(4, len(provinces_list)))
+            
+            for idx, province_name in enumerate(provinces_list[:4]):
+                with stats_cols[idx]:
+                    province_data = df[df['CTKD7'] == province_name].copy()
+                    if len(province_data) > 0 and kpi_all in province_data.columns:
+                        kpi_data = province_data[['Ngay7', kpi_all]].copy()
+                        kpi_data = kpi_data[(kpi_data[kpi_all].notna()) & (kpi_data[kpi_all] != 0)]
+                        if len(kpi_data) > 0:
+                            latest_value = kpi_data[kpi_all].iloc[-1]
+                            st.metric(province_name[:20], f"{latest_value:.2f}")
+    
+    if st.button("🔍 Phân tích chi tiết tất cả tỉnh", type="primary"):
+        with st.spinner("Đang phân tích tất cả tỉnh..."):
+            try:
+                alerts = detector.detect_declines(kpi_all, lookback_days=lookback_days)
+                
+                if alerts:
+                    st.warning(f"⚠️ Phát hiện {len(alerts)} tỉnh có suy giảm {kpi_all}")
+                    
+                    # Tạo DataFrame để hiển thị
+                    alerts_df = pd.DataFrame(alerts)
+                    alerts_df = alerts_df[['province', 'kpi', 'latest_date', 'latest_value', 
+                                         'compare_value', 'decline_pct', 'severity']]
+                    alerts_df['latest_date'] = alerts_df['latest_date'].dt.strftime('%d/%m/%Y')
+                    alerts_df.columns = ['Tỉnh', 'KPI', 'Ngày', 'Giá trị hiện tại', 
+                                        'Giá trị trước', 'Suy giảm (%)', 'Mức độ']
+                    
+                    st.dataframe(alerts_df, use_container_width=True)
+                    
+                    # Vẽ biểu đồ cho các tỉnh có vấn đề
+                    st.subheader("📈 Biểu đồ các tỉnh có suy giảm")
+                    
+                    if len(alerts) > 0:
+                        # Lấy danh sách tỉnh có vấn đề
+                        provinces_with_issues = [a['province'] for a in alerts]
+                        
+                        # Tạo biểu đồ matplotlib
+                        fig, ax = plt.subplots(figsize=(14, 8))
+                        
+                        for province_name in provinces_with_issues:
+                            province_data = df[df['CTKD7'] == province_name].copy()
+                            if len(province_data) > 0 and kpi_all in province_data.columns:
+                                kpi_data = province_data[['Ngay7', kpi_all]].copy()
+                                kpi_data = kpi_data[(kpi_data[kpi_all].notna()) & (kpi_data[kpi_all] != 0)]
+                                
+                                # Loại bỏ ngày được chọn
+                                if excluded_dates:
+                                    kpi_data = kpi_data[~kpi_data['Ngay7'].isin(excluded_dates)]
+                                
+                                # Lọc theo khoảng ngày nếu có
+                                if date_range and len(date_range) == 2:
+                                    kpi_data['Ngay7_dt'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                                    start_date = pd.Timestamp(date_range[0])
+                                    end_date = pd.Timestamp(date_range[1])
+                                    kpi_data = kpi_data[
+                                        (kpi_data['Ngay7_dt'] >= start_date) & 
+                                        (kpi_data['Ngay7_dt'] <= end_date)
+                                    ]
+                                    kpi_data = kpi_data.drop('Ngay7_dt', axis=1)
+                                
+                                if len(kpi_data) > 0:
+                                    kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                                    kpi_data = kpi_data.sort_values('Ngay7')
+                                    
+                                    # Tìm mức độ nghiêm trọng
+                                    alert = next((a for a in alerts if a['province'] == province_name), None)
+                                    if alert:
+                                        severity = alert['severity']
+                                        if severity == 'Cực kỳ nghiêm trọng':
+                                            color = 'red'
+                                            linewidth = 3
+                                        elif severity == 'Nghiêm trọng':
+                                            color = 'orange'
+                                            linewidth = 2.5
+                                        elif severity == 'Cảnh báo':
+                                            color = 'yellow'
+                                            linewidth = 2
+                                        else:
+                                            color = 'blue'
+                                            linewidth = 1.5
+                                    else:
+                                        color = 'gray'
+                                        linewidth = 1.5
+                                    
+                                    ax.plot(kpi_data['Ngay7'], kpi_data[kpi_all], 
+                                           marker='o', linewidth=linewidth, markersize=3,
+                                           label=f"{province_name} ({severity if alert else 'OK'})",
+                                           color=color, alpha=0.7)
+                        
+                        ax.set_title(f'{kpi_all} - Các tỉnh có suy giảm', fontsize=16, fontweight='bold')
+                        ax.set_xlabel('Ngày', fontsize=12)
+                        ax.set_ylabel(kpi_all, fontsize=12)
+                        ax.grid(True, alpha=0.3)
+                        ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
+                        ax.tick_params(axis='x', rotation=45)
+                        plt.tight_layout()
+                        st.pyplot(fig)
+                        plt.close(fig)
+                    
+                    # Download CSV
+                    csv = alerts_df.to_csv(index=False, encoding='utf-8-sig')
+                    st.download_button(
+                        label="📥 Download báo cáo CSV",
+                        data=csv,
+                        file_name=f"alerts_{kpi_all}_{datetime.now().strftime('%Y%m%d')}.csv",
+                        mime="text/csv"
+                    )
+                else:
+                    st.success("✅ Không phát hiện suy giảm nào cho tất cả tỉnh")
+                    
+                    # Vẫn hiển thị biểu đồ tất cả tỉnh (đã lọc)
+                    st.subheader("📈 Biểu đồ tất cả tỉnh")
+                    if all_provinces_data:
+                        # Rebuild với filter nếu cần
+                        filtered_all_provinces_data = []
+                        for province_name in provinces_list:
+                            province_data = df[df['CTKD7'] == province_name].copy()
+                            if len(province_data) > 0 and kpi_all in province_data.columns:
+                                kpi_data = province_data[['Ngay7', kpi_all]].copy()
+                                kpi_data = kpi_data[(kpi_data[kpi_all].notna()) & (kpi_data[kpi_all] != 0)]
+                                
+                                # Loại bỏ ngày được chọn
+                                if excluded_dates:
+                                    kpi_data = kpi_data[~kpi_data['Ngay7'].isin(excluded_dates)]
+                                
+                                # Lọc theo khoảng ngày nếu có
+                                if date_range and len(date_range) == 2:
+                                    kpi_data['Ngay7_dt'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                                    start_date = pd.Timestamp(date_range[0])
+                                    end_date = pd.Timestamp(date_range[1])
+                                    kpi_data = kpi_data[
+                                        (kpi_data['Ngay7_dt'] >= start_date) & 
+                                        (kpi_data['Ngay7_dt'] <= end_date)
+                                    ]
+                                    kpi_data = kpi_data.drop('Ngay7_dt', axis=1)
+                                
+                                if len(kpi_data) > 0:
+                                    kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
+                                    kpi_data = kpi_data.sort_values('Ngay7')
+                                    kpi_data['Tỉnh'] = province_name
+                                    filtered_all_provinces_data.append(kpi_data[['Ngay7', kpi_all, 'Tỉnh']])
+                        
+                        if filtered_all_provinces_data:
+                            combined_df = pd.concat(filtered_all_provinces_data, ignore_index=True)
+                            combined_df['Ngay7'] = combined_df['Ngay7'].dt.strftime('%Y-%m-%d')
+                            pivot_df = combined_df.pivot_table(
+                                index='Ngay7', 
+                                columns='Tỉnh', 
+                            values=kpi_all,
+                            aggfunc='first'
+                        )
+                        st.line_chart(pivot_df)
+                    
+            except Exception as e:
+                st.error(f"❌ Lỗi: {str(e)}")
+                st.exception(e)
+
+# TAB 4: ALERTS
+with tab4:
+    st.header("🚨 Hệ thống cảnh báo")
+    
+    st.info("""
+    **Tính năng này sẽ hiển thị tất cả cảnh báo suy giảm KPI.**
+    
+    - Quét tất cả KPI quan trọng
+    - Phát hiện suy giảm theo ngưỡng đã cấu hình
+    - Hiển thị danh sách cảnh báo chi tiết
+    """)
+    
+    critical_kpis = st.multiselect(
+        "Chọn KPI quan trọng cần giám sát",
+        kpi_cols,
+        default=['MTCL_2024', 'CSSR', 'CDR', 'HOSR_4G_2024'] if all(k in kpi_cols for k in ['MTCL_2024', 'CSSR', 'CDR', 'HOSR_4G_2024']) else kpi_cols[:4]
+    )
+    
+    if st.button("🔍 Quét cảnh báo", type="primary"):
+        with st.spinner("Đang quét tất cả KPI..."):
+            all_alerts = []
+            
+            for kpi in critical_kpis:
+                try:
+                    alerts = detector.detect_declines(kpi, lookback_days=lookback_days)
+                    all_alerts.extend(alerts)
+                except Exception as e:
+                    st.warning(f"⚠️ Lỗi khi phân tích {kpi}: {str(e)}")
+            
+            if all_alerts:
+                st.error(f"🚨 Phát hiện {len(all_alerts)} cảnh báo!")
+                
+                # Nhóm theo mức độ
+                severity_counts = {}
+                for alert in all_alerts:
+                    sev = alert['severity']
+                    severity_counts[sev] = severity_counts.get(sev, 0) + 1
+                
+                col1, col2, col3, col4 = st.columns(4)
+                with col1:
+                    st.metric("Cực kỳ nghiêm trọng", severity_counts.get('Cực kỳ nghiêm trọng', 0))
+                with col2:
+                    st.metric("Nghiêm trọng", severity_counts.get('Nghiêm trọng', 0))
+                with col3:
+                    st.metric("Cảnh báo", severity_counts.get('Cảnh báo', 0))
+                with col4:
+                    st.metric("Nhẹ", severity_counts.get('Nhẹ', 0))
+                
+                # Hiển thị chi tiết
+                alerts_df = pd.DataFrame(all_alerts)
+                alerts_df = alerts_df.sort_values('decline_pct', ascending=False)
+                st.dataframe(alerts_df, use_container_width=True)
+            else:
+                st.success("✅ Không có cảnh báo nào!")
+
+# Footer
+st.markdown("---")
+st.markdown("""
+<div style='text-align: center; color: #666;'>
+    <p>📊 Hệ thống Giám sát KPI | Chạy trên laptop local</p>
+    <p>Phiên bản 1.0 | Sử dụng Streamlit</p>
+</div>
+""", unsafe_allow_html=True)
+
