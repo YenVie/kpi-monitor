@@ -63,12 +63,200 @@ st.markdown('<div class="main-header">📊 HỆ THỐNG GIÁM SÁT KPI</div>', u
 st.sidebar.header("📁 Cấu hình")
 
 # Upload file CSV
+st.sidebar.subheader("📁 Quản lý dữ liệu")
+
+# Chế độ upload: Replace hoặc Append
+upload_mode = st.sidebar.radio(
+    "Chế độ upload:",
+    ["🔄 Thay thế file (Replace)", "➕ Gộp dữ liệu mới (Append)"],
+    help="Replace: Thay thế toàn bộ file cũ\nAppend: Tự động gộp dữ liệu mới vào file cũ (tiết kiệm thời gian)",
+    index=1
+)
+
 uploaded_file = st.sidebar.file_uploader(
     "Chọn file CSV dữ liệu KPI",
     type=['csv'],
     help="Upload file CSV chứa dữ liệu KPI",
     key="csv_uploader"
 )
+
+# Hàm merge dữ liệu mới vào file cũ - GIỮ NGUYÊN THỨ TỰ
+def merge_data_files(old_file_path, new_file_path, output_path):
+    """
+    Gộp dữ liệu mới vào file cũ, loại bỏ duplicate, GIỮ NGUYÊN THỨ TỰ BAN ĐẦU
+    
+    Args:
+        old_file_path: Đường dẫn file cũ
+        new_file_path: Đường dẫn file mới (upload)
+        output_path: Đường dẫn file output (thường là old_file_path)
+    
+    Returns:
+        dict: Thông tin về quá trình merge
+    """
+    try:
+        # Đọc file cũ (nếu có)
+        if os.path.exists(old_file_path):
+            df_old = pd.read_csv(old_file_path, encoding='utf-8-sig', low_memory=False)
+            # Chuẩn hóa tên cột
+            df_old.columns = [str(c).strip() for c in df_old.columns]
+            # Giữ nguyên thứ tự ban đầu bằng cách thêm cột index gốc
+            df_old['_original_index'] = range(len(df_old))
+        else:
+            df_old = pd.DataFrame()
+        
+        # Đọc file mới
+        df_new = pd.read_csv(new_file_path, encoding='utf-8-sig', low_memory=False)
+        df_new.columns = [str(c).strip() for c in df_new.columns]
+        
+        # Kiểm tra cột bắt buộc
+        required_cols = ['Ngay7', 'CTKD7']
+        missing_cols = [c for c in required_cols if c not in df_new.columns]
+        if missing_cols:
+            raise ValueError(f"File mới thiếu cột: {', '.join(missing_cols)}")
+        
+        # Nếu file cũ rỗng, chỉ cần lưu file mới
+        if df_old.empty:
+            df_merged = df_new.copy()
+            duplicates_removed = 0
+        else:
+            # Kiểm tra cột có giống nhau không
+            old_cols = set(df_old.columns) - {'_original_index'}
+            new_cols = set(df_new.columns)
+            if old_cols != new_cols:
+                # Cảnh báo nhưng vẫn merge với cột chung
+                common_cols = old_cols & new_cols
+                st.sidebar.warning(f"⚠️ File có số cột khác nhau. Chỉ merge {len(common_cols)} cột chung.")
+                df_old = df_old[list(common_cols) + ['_original_index']]
+                df_new = df_new[list(common_cols)]
+            
+            # Xử lý duplicate thông minh: giữ nguyên thứ tự file cũ
+            date_col = 'Ngay7'
+            province_col = 'CTKD7'
+            
+            if date_col in df_old.columns and date_col in df_new.columns and province_col in df_old.columns and province_col in df_new.columns:
+                # Chuyển đổi ngày để so sánh
+                df_old[date_col + '_parsed'] = pd.to_datetime(
+                    df_old[date_col], format='%d/%m/%Y', errors='coerce'
+                )
+                df_new[date_col + '_parsed'] = pd.to_datetime(
+                    df_new[date_col], format='%d/%m/%Y', errors='coerce'
+                )
+                
+                # Tạo key để xác định duplicate: Ngay7 + CTKD7
+                df_old['_merge_key'] = df_old[date_col + '_parsed'].astype(str) + '_' + df_old[province_col].astype(str)
+                df_new['_merge_key'] = df_new[date_col + '_parsed'].astype(str) + '_' + df_new[province_col].astype(str)
+                
+                # Lấy các key đã có trong file cũ
+                existing_keys = set(df_old['_merge_key'].values)
+                new_keys = set(df_new['_merge_key'].values)
+                
+                # Xác định dữ liệu mới (chưa có trong file cũ)
+                df_new_only = df_new[~df_new['_merge_key'].isin(existing_keys)].copy()
+                
+                # Xác định dữ liệu cần cập nhật (có trong cả 2 file)
+                keys_to_update = new_keys & existing_keys
+                duplicates_removed = len(keys_to_update)
+                
+                # Xử lý duplicate: thay thế dòng cũ bằng dòng mới tại đúng vị trí
+                if duplicates_removed > 0:
+                    # Lấy dữ liệu mới cần cập nhật
+                    df_new_update = df_new[df_new['_merge_key'].isin(keys_to_update)].copy()
+                    
+                    # Tạo mapping từ key đến dữ liệu mới
+                    new_data_dict = {}
+                    for _, row in df_new_update.iterrows():
+                        key = row['_merge_key']
+                        new_data_dict[key] = row
+                    
+                    # Thay thế dòng cũ bằng dòng mới tại đúng vị trí
+                    for idx in df_old.index:
+                        key = df_old.loc[idx, '_merge_key']
+                        if key in new_data_dict:
+                            # Thay thế dòng cũ bằng dòng mới, giữ nguyên index gốc
+                            new_row = new_data_dict[key].copy()
+                            new_row['_original_index'] = df_old.loc[idx, '_original_index']
+                            df_old.loc[idx] = new_row
+                    
+                    # Xóa các dòng đã được cập nhật khỏi df_new_update để tránh trùng
+                    df_new_update = pd.DataFrame()  # Đã xử lý xong
+                
+                # Xóa cột tạm từ df_old
+                df_old = df_old.drop(columns=['_merge_key', date_col + '_parsed'], errors='ignore')
+                
+                # Thêm dữ liệu mới vào cuối, với index lớn hơn để giữ thứ tự
+                if len(df_new_only) > 0:
+                    df_new_only = df_new_only.drop(columns=['_merge_key', date_col + '_parsed'], errors='ignore')
+                    # Thêm index lớn để đảm bảo dữ liệu mới ở cuối
+                    max_old_index = df_old['_original_index'].max() if len(df_old) > 0 else -1
+                    df_new_only['_original_index'] = range(max_old_index + 1, max_old_index + 1 + len(df_new_only))
+                    
+                    # Merge: file cũ (đã cập nhật duplicate) + dữ liệu mới
+                    df_merged = pd.concat([df_old, df_new_only], ignore_index=True)
+                else:
+                    df_merged = df_old.copy()
+                
+                # Sắp xếp lại theo index gốc để giữ thứ tự ban đầu
+                df_merged = df_merged.sort_values('_original_index', na_position='last')
+                df_merged = df_merged.drop(columns=['_original_index'], errors='ignore')
+                
+            else:
+                # Nếu không có cột ngày/tỉnh, merge đơn giản và loại bỏ duplicate
+                df_merged = pd.concat([df_old.drop(columns=['_original_index'], errors='ignore'), df_new], ignore_index=True)
+                before_dedup = len(df_merged)
+                df_merged = df_merged.drop_duplicates(keep='last')
+                duplicates_removed = before_dedup - len(df_merged)
+        
+        # Reset lại số thứ tự (STT) nếu có - ĐẾM LIÊN TỤC TỪ 1
+        # Tìm cột STT (có thể là "STT", "stt", "Số thứ tự", "textbox164", hoặc các biến thể)
+        stt_cols = [c for c in df_merged.columns if any(keyword in str(c).upper() 
+                   for keyword in ['STT', 'SỐ THỨ TỰ', 'TEXTBOX164', 'TEXTBOX', 'NO', 'NUMBER', 'INDEX'])]
+        
+        if stt_cols:
+            stt_col = stt_cols[0]  # Lấy cột đầu tiên tìm thấy
+            
+            # QUAN TRỌNG: Reset index của DataFrame trước khi gán STT
+            # Đảm bảo index liên tục từ 0 đến len-1
+            df_merged = df_merged.reset_index(drop=True)
+            
+            # Reset lại STT cho toàn bộ file đã merge, đếm liên tục từ 1
+            # Sử dụng iloc để đảm bảo gán đúng cho tất cả các dòng
+            try:
+                # Cách 1: Gán trực tiếp bằng list
+                df_merged[stt_col] = list(range(1, len(df_merged) + 1))
+            except:
+                try:
+                    # Cách 2: Gán bằng Series với index đúng
+                    df_merged[stt_col] = pd.Series(range(1, len(df_merged) + 1), index=df_merged.index)
+                except:
+                    # Cách 3: Gán từng dòng một (chậm nhưng chắc chắn)
+                    for i in range(len(df_merged)):
+                        df_merged.iloc[i, df_merged.columns.get_loc(stt_col)] = i + 1
+        
+        # Lưu file đã merge
+        df_merged.to_csv(output_path, index=False, encoding='utf-8-sig')
+        
+        # Thống kê
+        stats = {
+            'old_rows': len(df_old) if not df_old.empty else 0,
+            'new_rows': len(df_new),
+            'merged_rows': len(df_merged),
+            'duplicates_removed': duplicates_removed,
+            'added_rows': len(df_merged) - (len(df_old) if not df_old.empty else 0)
+        }
+        
+        # Thống kê ngày
+        if 'Ngay7' in df_merged.columns:
+            df_merged['Ngay7_parsed'] = pd.to_datetime(
+                df_merged['Ngay7'], format='%d/%m/%Y', errors='coerce'
+            )
+            stats['min_date'] = df_merged['Ngay7_parsed'].min()
+            stats['max_date'] = df_merged['Ngay7_parsed'].max()
+            df_merged = df_merged.drop(columns=['Ngay7_parsed'], errors='ignore')
+        
+        return stats
+        
+    except Exception as e:
+        raise Exception(f"Lỗi khi merge dữ liệu: {str(e)}")
 
 # Khởi tạo detector với cache nhưng có thể clear (ĐỊNH NGHĨA TRƯỚC)
 @st.cache_data(ttl=3600)  # Cache 1 giờ, nhưng có thể clear bằng button
@@ -91,49 +279,124 @@ def load_data(file_path):
 file_path = None
 file_changed = False
 
+# Kiểm tra xem đã xử lý file này chưa (tránh vòng lặp vô hạn)
+if 'last_processed_file' not in st.session_state:
+    st.session_state.last_processed_file = None
+if 'last_processed_size' not in st.session_state:
+    st.session_state.last_processed_size = 0
+
 if uploaded_file is not None:
-    # Lưu file upload vào thư mục hiện tại
-    file_path = '1.Ngày.csv'
-    
-    # Kiểm tra xem file có thay đổi không (dựa vào timestamp hoặc size)
-    file_changed = True
-    if os.path.exists(file_path):
-        old_size = os.path.getsize(file_path)
-        new_size = uploaded_file.size
-        if old_size != new_size:
-            file_changed = True
-        else:
-            # Kiểm tra nội dung (so sánh hash)
-            uploaded_file.seek(0)
-            new_content = uploaded_file.read()
-            uploaded_file.seek(0)
-            
-            with open(file_path, 'rb') as f:
-                old_content = f.read()
-            
-            if new_content != old_content:
+    # Kiểm tra xem file này đã được xử lý chưa
+    file_id = f"{uploaded_file.name}_{uploaded_file.size}"
+    if st.session_state.last_processed_file == file_id:
+        # File đã được xử lý, chỉ cần set file_path để tiếp tục
+        file_path = '1.Ngày.csv'
+    else:
+        # Lưu file upload vào thư mục hiện tại
+        file_path = '1.Ngày.csv'
+        is_append_mode = "Append" in upload_mode
+        
+        if is_append_mode:
+            # CHẾ ĐỘ APPEND: Gộp dữ liệu mới vào file cũ
+            if os.path.exists(file_path):
+                # Lưu file mới tạm thời
+                temp_new_file = 'temp_new_data.csv'
+                with open(temp_new_file, 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+                
+                try:
+                    # Merge dữ liệu
+                    stats = merge_data_files(file_path, temp_new_file, file_path)
+                    
+                    # Đánh dấu đã xử lý file này
+                    st.session_state.last_processed_file = file_id
+                    
+                    # Clear cache để load dữ liệu mới
+                    load_data.clear()
+                    
+                    # Hiển thị thông tin merge
+                    st.sidebar.success("✅ Đã gộp dữ liệu mới thành công!")
+                    st.sidebar.info(f"📊 **Thống kê:**")
+                    st.sidebar.info(f"  • Dòng cũ: {stats['old_rows']:,}")
+                    st.sidebar.info(f"  • Dòng mới (upload): {stats['new_rows']:,}")
+                    st.sidebar.info(f"  • Dòng sau merge: {stats['merged_rows']:,}")
+                    st.sidebar.info(f"  • Dòng đã thêm: {stats['added_rows']:,}")
+                    
+                    if stats['duplicates_removed'] > 0:
+                        st.sidebar.warning(f"⚠️ Đã loại bỏ {stats['duplicates_removed']:,} dòng trùng lặp (thay bằng dữ liệu mới)")
+                    
+                    if 'min_date' in stats and 'max_date' in stats:
+                        min_date = stats['min_date']
+                        max_date = stats['max_date']
+                        if pd.notna(min_date) and pd.notna(max_date):
+                            st.sidebar.info(f"📅 Khoảng ngày: {min_date.strftime('%d/%m/%Y')} - {max_date.strftime('%d/%m/%Y')}")
+                    
+                    file_changed = True
+                    
+                except Exception as e:
+                    st.sidebar.error(f"❌ Lỗi khi gộp dữ liệu: {str(e)}")
+                    st.exception(e)
+                    st.stop()
+                finally:
+                    # Xóa file tạm
+                    if os.path.exists(temp_new_file):
+                        try:
+                            os.remove(temp_new_file)
+                        except:
+                            pass
+            else:
+                # Chưa có file cũ, chỉ cần lưu file mới
+                with open(file_path, 'wb') as f:
+                    f.write(uploaded_file.getbuffer())
+                st.session_state.last_processed_file = file_id
+                load_data.clear()
+                st.sidebar.success(f"✅ Đã tạo file mới! ({uploaded_file.size:,} bytes)")
                 file_changed = True
-    
-    # Lưu file mới
-    with open(file_path, 'wb') as f:
-        f.write(uploaded_file.getbuffer())
-    
-    st.sidebar.success(f"✅ Đã upload file thành công! ({uploaded_file.size:,} bytes)")
-    
-    # Hiển thị thông tin file
-    st.sidebar.info(f"📄 Tên file: {uploaded_file.name}")
-    
-    # Clear cache khi file mới được upload
-    if file_changed:
-        load_data.clear()
-        st.sidebar.success("🔄 Đã cập nhật dữ liệu mới!")
-elif os.path.exists('1.Ngày.csv'):
-    file_path = '1.Ngày.csv'
-    file_size = os.path.getsize(file_path)
-    st.sidebar.success(f"✅ Đang sử dụng file: 1.Ngày.csv ({file_size:,} bytes)")
-else:
-    st.sidebar.warning("⚠️ Chưa có file CSV. Vui lòng upload file.")
-    st.stop()
+        
+        if not is_append_mode:
+            # CHẾ ĐỘ REPLACE: Thay thế toàn bộ file cũ (GIỮ NGUYÊN CHỨC NĂNG CŨ)
+            # Kiểm tra xem file có thay đổi không (dựa vào timestamp hoặc size)
+            file_changed = True
+            if os.path.exists(file_path):
+                old_size = os.path.getsize(file_path)
+                new_size = uploaded_file.size
+                if old_size != new_size:
+                    file_changed = True
+                else:
+                    # Kiểm tra nội dung (so sánh hash)
+                    uploaded_file.seek(0)
+                    new_content = uploaded_file.read()
+                    uploaded_file.seek(0)
+                    
+                    with open(file_path, 'rb') as f:
+                        old_content = f.read()
+                    
+                    if new_content != old_content:
+                        file_changed = True
+            
+            # Lưu file mới
+            with open(file_path, 'wb') as f:
+                f.write(uploaded_file.getbuffer())
+            
+            # Đánh dấu đã xử lý file này
+            st.session_state.last_processed_file = file_id
+            load_data.clear()
+            
+            st.sidebar.success(f"✅ Đã thay thế file thành công! ({uploaded_file.size:,} bytes)")
+            
+            # Hiển thị thông tin file
+            st.sidebar.info(f"📄 Tên file: {uploaded_file.name}")
+            file_changed = True
+
+# Xác định file_path nếu chưa có
+if file_path is None:
+    if os.path.exists('1.Ngày.csv'):
+        file_path = '1.Ngày.csv'
+        file_size = os.path.getsize(file_path)
+        st.sidebar.success(f"✅ Đang sử dụng file: 1.Ngày.csv ({file_size:,} bytes)")
+    else:
+        st.sidebar.warning("⚠️ Chưa có file CSV. Vui lòng upload file.")
+        st.stop()
 
 # Cấu hình
 st.sidebar.subheader("⚙️ Cấu hình phân tích")
