@@ -21,6 +21,97 @@ from matplotlib.dates import DayLocator, DateFormatter
 from matplotlib.ticker import MaxNLocator, FuncFormatter
 matplotlib.use('Agg')  # Backend cho Streamlit
 
+# ==== Tiện ích đọc/ghi và gộp dữ liệu (không ảnh hưởng flow hiện tại) ====
+CSV_ENCODINGS = ['utf-8-sig', 'utf-8', 'cp1258', 'latin1']
+DATA_FILE_PATH = '1.Ngày.csv'
+
+def _read_csv_any(path: str) -> pd.DataFrame:
+    last_err = None
+    for enc in CSV_ENCODINGS:
+        try:
+            return pd.read_csv(path, encoding=enc, low_memory=False)
+        except Exception as e:
+            last_err = e
+    raise RuntimeError(f"Không đọc được CSV: {path} ({last_err})")
+
+def _normalize_text(s: str) -> str:
+    if s is None:
+        return ''
+    s = unicodedata.normalize('NFD', str(s))
+    s = ''.join(ch for ch in s if unicodedata.category(ch) != 'Mn')
+    return s.upper().strip()
+
+def merge_into_current(old_path: str, new_path: str) -> dict:
+    """Gộp new_path vào old_path theo khóa (Ngay7 + CTKD7), cập nhật trùng, giữ thứ tự và đánh lại STT."""
+    if not os.path.exists(old_path):
+        df_new = _read_csv_any(new_path)
+        df_new.to_csv(old_path, index=False, encoding='utf-8-sig')
+        return {"rows_old": 0, "rows_new": len(df_new), "rows_added": len(df_new), "rows_updated": 0, "total_rows": len(df_new)}
+
+    df_old = _read_csv_any(old_path)
+    df_new = _read_csv_any(new_path)
+
+    # Chuẩn hóa tên cột
+    df_old.columns = [str(c).strip() for c in df_old.columns]
+    df_new.columns = [str(c).strip() for c in df_new.columns]
+
+    required = ['Ngay7', 'CTKD7']
+    for col in required:
+        if col not in df_old.columns or col not in df_new.columns:
+            raise ValueError(f"Thiếu cột bắt buộc '{col}' trong file cần gộp.")
+
+    # Chuẩn hóa ngày và khóa gộp
+    def _prep(df: pd.DataFrame) -> pd.DataFrame:
+        df = df.copy()
+        df['Ngay7_parsed'] = pd.to_datetime(df['Ngay7'], format='%d/%m/%Y', errors='coerce')
+        if df['Ngay7_parsed'].isna().all():
+            df['Ngay7_parsed'] = pd.to_datetime(df['Ngay7'], dayfirst=True, errors='coerce')
+        df['_key'] = df['Ngay7_parsed'].dt.strftime('%Y-%m-%d') + '||' + df['CTKD7'].astype(str).str.strip().str.upper()
+        return df
+
+    df_old_p = _prep(df_old)
+    df_new_p = _prep(df_new)
+
+    old_idx = df_old_p.set_index('_key')
+    new_idx = df_new_p.set_index('_key')
+
+    matching = old_idx.index.intersection(new_idx.index)
+    new_only = new_idx.index.difference(old_idx.index)
+
+    rows_updated = len(matching)
+    if rows_updated > 0:
+        old_idx.update(new_idx.loc[matching])
+    df_old_u = old_idx.reset_index()
+    df_new_only = new_idx.loc[new_only].reset_index()
+
+    # Hợp nhất, giữ thứ tự: cũ trước, mới thêm nối sau
+    df_merged = pd.concat([df_old_u, df_new_only], ignore_index=True, sort=False)
+
+    # Đánh lại STT nếu có cột liên quan
+    stt_candidates = [c for c in df_merged.columns if any(k in _normalize_text(c) for k in ['STT', 'SO THU TU', 'TEXTBOX164', 'TEXTBOX'])]
+    if stt_candidates:
+        stt_col = stt_candidates[0]
+        df_merged = df_merged.reset_index(drop=True)
+        df_merged[stt_col] = range(1, len(df_merged) + 1)
+
+    # Làm sạch cột phụ trợ
+    for col in ['Ngay7_parsed', '_key']:
+        if col in df_merged.columns:
+            df_merged = df_merged.drop(columns=[col])
+
+    # Chuẩn lại định dạng ngày
+    if 'Ngay7' in df_merged.columns:
+        df_merged['Ngay7'] = pd.to_datetime(df_merged['Ngay7'], errors='coerce', dayfirst=True).dt.strftime('%d/%m/%Y')
+
+    df_merged.to_csv(old_path, index=False, encoding='utf-8-sig')
+    return {
+        "rows_old": len(df_old),
+        "rows_new": len(df_new),
+        "rows_added": len(df_new_only),
+        "rows_updated": rows_updated,
+        "total_rows": len(df_merged),
+    }
+
 # Import các module hiện có
 try:
     from kpi_decline_detection_pipeline import KPIDeclineDetector
@@ -69,6 +160,17 @@ uploaded_file = st.sidebar.file_uploader(
     help="Upload file CSV chứa dữ liệu KPI",
     key="csv_uploader"
 )
+
+# Tùy chọn gộp nhanh (không ảnh hưởng flow upload hiện tại)
+st.sidebar.markdown("---")
+st.sidebar.subheader("➕ Gộp dữ liệu mới vào file hiện tại")
+append_file = st.sidebar.file_uploader(
+    "Chọn file CSV cần gộp",
+    type=['csv'],
+    help="Chọn file ngày mới để gộp thẳng vào 1.Ngày.csv",
+    key="csv_append_uploader"
+)
+do_merge = st.sidebar.button("Gộp vào file hiện tại", help="Gộp file vừa chọn vào dữ liệu đang dùng")
 
 # Khởi tạo detector với cache nhưng có thể clear (ĐỊNH NGHĨA TRƯỚC)
 @st.cache_data(ttl=3600)  # Cache 1 giờ, nhưng có thể clear bằng button
@@ -127,6 +229,27 @@ if uploaded_file is not None:
     if file_changed:
         load_data.clear()
         st.sidebar.success("🔄 Đã cập nhật dữ liệu mới!")
+elif do_merge and append_file is not None:
+    # Lưu file gộp tạm thời và thực hiện gộp vào DATA_FILE_PATH
+    try:
+        tmp_path = f"__tmp_merge_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        with open(tmp_path, 'wb') as ftmp:
+            ftmp.write(append_file.getbuffer())
+        stats = merge_into_current(DATA_FILE_PATH if os.path.exists(DATA_FILE_PATH) else '1.Ngày.csv', tmp_path)
+        os.remove(tmp_path)
+        load_data.clear()
+        st.sidebar.success("✅ Đã gộp dữ liệu mới vào file hiện tại!")
+        st.sidebar.info(
+            f"""📊 Thống kê gộp:
+- Dòng cũ: {stats['rows_old']:,}
+- Dòng mới: {stats['rows_new']:,}
+- Cập nhật: {stats['rows_updated']:,}
+- Thêm mới: {stats['rows_added']:,}
+- Tổng sau gộp: {stats['total_rows']:,}"""
+        )
+        file_path = '1.Ngày.csv'
+    except Exception as e:
+        st.sidebar.error(f"❌ Lỗi khi gộp: {e}")
 elif os.path.exists('1.Ngày.csv'):
     file_path = '1.Ngày.csv'
     file_size = os.path.getsize(file_path)
@@ -945,4 +1068,3 @@ st.markdown("""
     <p>Phiên bản 1.0 | Sử dụng Streamlit</p>
 </div>
 """, unsafe_allow_html=True)
-
