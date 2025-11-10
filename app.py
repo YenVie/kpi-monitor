@@ -193,7 +193,34 @@ def load_data(file_path):
 file_path = None
 file_changed = False
 
-if uploaded_file is not None:
+# ƯU TIÊN XỬ LÝ NÚT GỘP TRƯỚC (kể cả khi uploader chính đang có file)
+if 'do_merge_trigger' not in st.session_state:
+    st.session_state.do_merge_trigger = False
+
+# Nếu bấm nút gộp
+if do_merge and append_file is not None:
+    try:
+        tmp_path = f"__tmp_merge_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+        with open(tmp_path, 'wb') as ftmp:
+            ftmp.write(append_file.getbuffer())
+        target_path = DATA_FILE_PATH if os.path.exists(DATA_FILE_PATH) else '1.Ngày.csv'
+        stats = merge_into_current(target_path, tmp_path)
+        os.remove(tmp_path)
+        load_data.clear()
+        st.sidebar.success("✅ Đã gộp dữ liệu mới vào file hiện tại!")
+        st.sidebar.info(
+            f"""📊 Thống kê gộp:
+- Dòng cũ: {stats['rows_old']:,}
+- Dòng mới: {stats['rows_new']:,}
+- Cập nhật: {stats['rows_updated']:,}
+- Thêm mới: {stats['rows_added']:,}
+- Tổng sau gộp: {stats['total_rows']:,}"""
+        )
+        file_path = target_path
+    except Exception as e:
+        st.sidebar.error(f"❌ Lỗi khi gộp: {e}")
+
+elif uploaded_file is not None:
     # Lưu file upload vào thư mục hiện tại
     file_path = '1.Ngày.csv'
     
@@ -229,27 +256,6 @@ if uploaded_file is not None:
     if file_changed:
         load_data.clear()
         st.sidebar.success("🔄 Đã cập nhật dữ liệu mới!")
-elif do_merge and append_file is not None:
-    # Lưu file gộp tạm thời và thực hiện gộp vào DATA_FILE_PATH
-    try:
-        tmp_path = f"__tmp_merge_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
-        with open(tmp_path, 'wb') as ftmp:
-            ftmp.write(append_file.getbuffer())
-        stats = merge_into_current(DATA_FILE_PATH if os.path.exists(DATA_FILE_PATH) else '1.Ngày.csv', tmp_path)
-        os.remove(tmp_path)
-        load_data.clear()
-        st.sidebar.success("✅ Đã gộp dữ liệu mới vào file hiện tại!")
-        st.sidebar.info(
-            f"""📊 Thống kê gộp:
-- Dòng cũ: {stats['rows_old']:,}
-- Dòng mới: {stats['rows_new']:,}
-- Cập nhật: {stats['rows_updated']:,}
-- Thêm mới: {stats['rows_added']:,}
-- Tổng sau gộp: {stats['total_rows']:,}"""
-        )
-        file_path = '1.Ngày.csv'
-    except Exception as e:
-        st.sidebar.error(f"❌ Lỗi khi gộp: {e}")
 elif os.path.exists('1.Ngày.csv'):
     file_path = '1.Ngày.csv'
     file_size = os.path.getsize(file_path)
