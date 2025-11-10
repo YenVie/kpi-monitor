@@ -44,6 +44,24 @@ CONFIG = {
     # ví dụ theo file PDF: CDR <= 0.35% (tức là giá trị nhỏ hơn thì tốt)
     'kpi_rules': {
         'CDR': { 'direction': 'lower_better', 'limit': 0.35 },
+        # VN_CALL_DR (Retainability) – đơn vị %, càng thấp càng tốt.
+        # Theo bảng ngưỡng: đạt 100 điểm khi T ≤ 0.5% → chọn limit = 0.5 và hướng lower_better
+        'VN_CALL_DR': { 'direction': 'lower_better', 'limit': 0.5 },
+        # ID4G_USR_DL_THP (Throughput 4G DL) – đơn vị Kbps trong dữ liệu hiện tại.
+        # Bảng chuẩn: 100 điểm khi T ≥ 15 Mbps → tương đương 15000 Kbps
+        'ID4G_USR_DL_THP': { 'direction': 'higher_better', 'limit': 15000 },
+        '4G_USR_DL_THP': { 'direction': 'higher_better', 'limit': 15000 },
+        # Coverage/Chất lượng vùng phủ (đơn vị %) – càng cao càng tốt, chuẩn ≥ 95
+        'COVERAGE_4G': { 'direction': 'higher_better', 'limit': 95.0 },
+        'CHATLUONGVUNGPHU': { 'direction': 'higher_better', 'limit': 95.0 },
+        'ChatLuongVungPhu': { 'direction': 'higher_better', 'limit': 95.0 },
+        # Sự cố – là biến đếm: càng thấp càng tốt, limit = 0 (chỉ alert khi > 0 và xấu đi)
+        'SU_CO_LON': { 'direction': 'lower_better', 'limit': 0 },
+        'SU_CO_NGHIEM_TRONG': { 'direction': 'lower_better', 'limit': 0 },
+        'SU_CO_RAT_NGHIEM_TRONG': { 'direction': 'lower_better', 'limit': 0 },
+        'SuCoLon': { 'direction': 'lower_better', 'limit': 0 },
+        'SuCoNghiemTrong': { 'direction': 'lower_better', 'limit': 0 },
+        'SuCoRatNghiemTrong': { 'direction': 'lower_better', 'limit': 0 },
         # Ví dụ thêm: 'CSSR': { 'direction': 'higher_better', 'limit': 99.0 }
     }
 }
@@ -60,11 +78,16 @@ class KPIDeclineDetector:
         self.decline_alerts = []
         
     def _get_kpi_rule(self, kpi_column: str) -> Optional[Dict]:
-        """Tìm rule theo tên KPI (match tiền tố, không phân biệt hoa/thường)."""
+        """Tìm rule theo tên KPI (không phân biệt hoa/thường, bỏ khoảng trắng/ký tự lạ)."""
+        def _norm(s: str) -> str:
+            s = (s or "").upper().strip()
+            # Bỏ mọi ký tự không phải chữ/số/underscore
+            return ''.join(ch for ch in s if ch.isalnum() or ch == '_')
+
         rules = self.config.get('kpi_rules') or {}
-        kpi_up = str(kpi_column).upper()
+        kpi_norm = _norm(kpi_column)
         for key, rule in rules.items():
-            if key.upper() in kpi_up:
+            if _norm(key) == kpi_norm or _norm(key) in kpi_norm:
                 return rule
         return None
 

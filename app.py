@@ -16,7 +16,9 @@ import os
 from datetime import datetime
 import matplotlib.pyplot as plt
 import matplotlib
+import unicodedata
 from matplotlib.dates import DayLocator, DateFormatter
+from matplotlib.ticker import MaxNLocator, FuncFormatter
 matplotlib.use('Agg')  # Backend cho Streamlit
 
 # Import các module hiện có
@@ -180,14 +182,74 @@ with tab1:
         st.metric("Khoảng thời gian", f"{date_range.days} ngày")
     
     with col4:
+        # Đếm số KPI (bao gồm các KPI mới: vùng phủ & sự cố)
         kpi_cols = [c for c in df.columns if any(k in c.upper() 
-                   for k in ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR'])]
+                   for k in ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR', 'COVERAGE', 'CHATLUONG', 'SUCO', 'SU_CO'])]
         st.metric("Số KPI", len(kpi_cols))
     
-    # Hiển thị một phần dữ liệu
+    # Hiển thị dữ liệu với phân trang
     st.subheader("📋 Xem dữ liệu")
-    if st.checkbox("Hiển thị 10 dòng đầu"):
-        st.dataframe(df.head(10), use_container_width=True)
+    
+    # Tùy chọn hiển thị
+    col_view1, col_view2 = st.columns(2)
+    
+    with col_view1:
+        show_all = st.checkbox("Hiển thị toàn bộ dữ liệu", value=False, help="Bỏ chọn để xem từng trang")
+    
+    with col_view2:
+        if not show_all:
+            rows_per_page = st.selectbox(
+                "Số dòng mỗi trang",
+                options=[10, 25, 50, 100, 200],
+                index=0,
+                help="Chọn số dòng hiển thị mỗi trang"
+            )
+        else:
+            rows_per_page = len(df)
+    
+    # Phân trang
+    if not show_all and rows_per_page < len(df):
+        total_rows = len(df)
+        total_pages = (total_rows + rows_per_page - 1) // rows_per_page
+        
+        # Session state để lưu trang hiện tại
+        if 'current_page' not in st.session_state:
+            st.session_state.current_page = 1
+        
+        # Điều hướng trang
+        col_nav1, col_nav2, col_nav3 = st.columns([1, 2, 1])
+        
+        with col_nav1:
+            if st.button("⏮️ Trang đầu", use_container_width=True):
+                st.session_state.current_page = 1
+                st.rerun()
+            if st.button("◀️ Trang trước", use_container_width=True):
+                if st.session_state.current_page > 1:
+                    st.session_state.current_page -= 1
+                    st.rerun()
+        
+        with col_nav2:
+            current_page = st.session_state.current_page
+            st.info(f"📄 Trang {current_page} / {total_pages} | Dòng {(current_page-1)*rows_per_page + 1} - {min(current_page*rows_per_page, total_rows)} / {total_rows}")
+        
+        with col_nav3:
+            if st.button("▶️ Trang sau", use_container_width=True):
+                if st.session_state.current_page < total_pages:
+                    st.session_state.current_page += 1
+                    st.rerun()
+            if st.button("⏭️ Trang cuối", use_container_width=True):
+                st.session_state.current_page = total_pages
+                st.rerun()
+        
+        # Hiển thị dữ liệu theo trang
+        start_idx = (st.session_state.current_page - 1) * rows_per_page
+        end_idx = start_idx + rows_per_page
+        page_data = df.iloc[start_idx:end_idx]
+        
+        st.dataframe(page_data, use_container_width=True, height=400)
+    else:
+        # Hiển thị toàn bộ dữ liệu
+        st.dataframe(df, use_container_width=True, height=600)
 
 # TAB 2: PHÂN TÍCH TỈNH
 with tab2:
@@ -212,14 +274,48 @@ with tab2:
                 province = st.selectbox("Tỉnh tìm thấy", filtered_provinces)
     
     with col2:
-        # Dropdown chọn KPI
-        kpi_cols = [c for c in df.columns if any(k in c.upper() 
-                   for k in ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR'])]
-        kpi = st.selectbox(
+        # Dropdown chọn KPI (hiển thị tên thân thiện)
+        def _norm(s: str) -> str:
+            s = unicodedata.normalize('NFD', str(s))
+            s = ''.join(ch for ch in s if unicodedata.category(ch) != 'Mn')
+            s = s.upper().replace(' ', '').replace('-', '').replace('.', '').replace('_', '_')
+            return s
+        tokens = ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR', 'COVERAGE', 'CHATLUONG', 'SUCO', 'SU_CO', 'SCL', 'SCNT1', 'SCRNT']
+        kpi_cols_raw = [c for c in df.columns if any(t in _norm(c) for t in tokens)]
+        # Map tên hiển thị thân thiện
+        alias_display_map = {
+            'ID4G_USR_DL_THP': '4G_USR_DL_THP',  # hiển thị đẹp
+        }
+        # Thêm alias hiển thị cho các cột sự cố nếu tên gốc là tiếng Việt có dấu
+        for c in df.columns:
+            cn = _norm(c)
+            if 'SUCOLON' == cn or cn == 'SCL':
+                alias_display_map[c] = 'SuCoLon'
+            elif 'SUCONGHIEMTRONG' == cn or cn == 'SCNT1':
+                alias_display_map[c] = 'SuCoNghiemTrong'
+            elif 'SUCORATNGHIEMTRONG' == cn or cn == 'SCRNT':
+                alias_display_map[c] = 'SuCoRatNghiemTrong'
+            elif 'COVERAGE4G' == cn or 'CHATLUONGVUNGPHU' == cn:
+                alias_display_map[c] = 'ChatLuongVungPhu'
+        kpi_display_options = [alias_display_map.get(c, c) for c in kpi_cols_raw]
+        selected_kpi_display = st.selectbox(
             "Chọn KPI",
-            kpi_cols,
+            kpi_display_options,
             help="Chọn KPI cần phân tích"
         )
+        # Map ngược về tên cột thực tế
+        if selected_kpi_display == '4G_USR_DL_THP':
+            if '4G_USR_DL_THP' in df.columns:
+                kpi = '4G_USR_DL_THP'
+            else:
+                kpi = 'ID4G_USR_DL_THP'
+        else:
+            # Tìm ngược theo alias nếu là sự cố hoặc vùng phủ
+            reverse_map = {v: k for k, v in alias_display_map.items()}
+            if selected_kpi_display in reverse_map:
+                kpi = reverse_map[selected_kpi_display]
+            else:
+                kpi = selected_kpi_display
         
         # Tìm kiếm KPI
         search_kpi = st.text_input("🔍 Tìm kiếm KPI (nhập một phần tên)")
@@ -233,9 +329,11 @@ with tab2:
     col_filter1, col_filter2 = st.columns(2)
     
     with col_filter1:
-        # Lấy danh sách ngày có dữ liệu
-        all_dates = sorted(df['Ngay7'].dropna().unique())
-        all_dates_str = [str(d) for d in all_dates]
+        # Lấy danh sách ngày có dữ liệu (chuẩn hóa theo datetime để sắp xếp đúng)
+        all_dates_dt = pd.to_datetime(df['Ngay7'], format='%d/%m/%Y', errors='coerce').dropna()
+        all_dates_dt = all_dates_dt.sort_values().unique()
+        all_dates = [d.strftime('%d/%m/%Y') for d in all_dates_dt]
+        all_dates_str = all_dates
         
         # Multi-select để chọn ngày cần loại bỏ
         excluded_dates_province = st.multiselect(
@@ -297,7 +395,7 @@ with tab2:
                 kpi_data['Ngay7'] = pd.to_datetime(kpi_data['Ngay7'], format='%d/%m/%Y', errors='coerce')
                 kpi_data = kpi_data.sort_values('Ngay7')
                 
-                # Biểu đồ tương tác Streamlit
+                # Biểu đồ tương tác Streamlit (giữ định dạng YYYY-MM-DD như trước)
                 kpi_data_display = kpi_data.copy()
                 kpi_data_display['Ngay7'] = kpi_data_display['Ngay7'].dt.strftime('%Y-%m-%d')
                 chart_data = kpi_data_display.set_index('Ngay7')[kpi].to_frame()
@@ -396,13 +494,23 @@ with tab2:
                         ax.plot(kpi_data['Ngay7'], kpi_data[kpi], marker='o', linewidth=2, markersize=4)
                         ax.set_title(f'{kpi} - {matched_province}', fontsize=14, fontweight='bold')
                         ax.set_xlabel('Ngày', fontsize=12)
-                        ax.set_ylabel(kpi, fontsize=12)
+                        ax.set_ylabel('', fontsize=12)  # Bỏ label trục Y
                         ax.grid(True, alpha=0.3)
                         
                         # Hiển thị tất cả các ngày trên trục x (bất kỳ khoảng ngày nào)
                         ax.xaxis.set_major_locator(DayLocator(interval=1))  # Luôn hiển thị tất cả các ngày
                         ax.xaxis.set_major_formatter(DateFormatter('%d/%m/%Y'))
                         ax.tick_params(axis='x', rotation=45)
+                        
+                        # Đảm bảo trục Y luôn hiển thị đầy đủ số khi phóng to
+                        ax.tick_params(axis='y', which='both', labelsize=10)
+                        ax.yaxis.set_minor_locator(plt.NullLocator())  # Tắt minor ticks
+                        # Force hiển thị tối thiểu số tick trên trục Y
+                        ax.yaxis.set_major_locator(MaxNLocator(nbins=10, integer=False))
+                        # Format 2 chữ số thập phân cho trục Y
+                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, pos: f"{y:.2f}"))
+                        # Tăng margin bên trái để có chỗ hiển thị số
+                        fig.subplots_adjust(left=0.10, right=0.95, top=0.93, bottom=0.15)
                         
                         # Điều chỉnh layout để tránh nhãn bị cắt
                         plt.setp(ax.xaxis.get_majorticklabels(), ha='right')
@@ -430,7 +538,7 @@ with tab2:
                         st.pyplot(fig)
                         plt.close(fig)
                         
-                        # Thêm biểu đồ tương tác bằng Streamlit
+                        # Thêm biểu đồ tương tác bằng Streamlit (YYYY-MM-DD)
                         st.subheader("📊 Biểu đồ tương tác")
                         kpi_data_display = kpi_data.copy()
                         kpi_data_display['Ngay7'] = kpi_data_display['Ngay7'].dt.strftime('%Y-%m-%d')
@@ -446,20 +554,54 @@ with tab2:
 with tab3:
     st.header("📈 Phân tích tất cả tỉnh")
     
-    # Chọn KPI
-    kpi_all = st.selectbox(
+    # Chọn KPI (hiển thị tên thân thiện) - tính độc lập để không phụ thuộc biến trước đó
+    def _norm2(s: str) -> str:
+        import unicodedata as _ud
+        s = _ud.normalize('NFD', str(s))
+        s = ''.join(ch for ch in s if _ud.category(ch) != 'Mn')
+        return s.upper().replace(' ', '').replace('-', '').replace('.', '')
+    # Bổ sung các mã cột sự cố dạng viết tắt: SCL, SCNT1, SCRNT
+    tokens_all = ['MTCL', 'CSSR', 'CDR', 'HOSR', 'ERAB', 'DATA', 'VN', 'QOS', 'SR', 'DR', 'COVERAGE', 'CHATLUONG', 'SUCO', 'SU_CO', 'SCL', 'SCNT1', 'SCRNT']
+    kpi_cols_raw_all = [c for c in df.columns if any(t in _norm2(c) for t in tokens_all)]
+    alias_display_map_all = {'ID4G_USR_DL_THP': '4G_USR_DL_THP'}
+    # Bổ sung alias cho sự cố và vùng phủ
+    for c in kpi_cols_raw_all:
+        cn = _norm2(c)
+        if cn in ('SUCOLON', 'SCL'):
+            alias_display_map_all[c] = 'SuCoLon'
+        elif cn in ('SUCONGHIEMTRONG', 'SCNT1'):
+            alias_display_map_all[c] = 'SuCoNghiemTrong'
+        elif cn in ('SUCORATNGHIEMTRONG', 'SCRNT'):
+            alias_display_map_all[c] = 'SuCoRatNghiemTrong'
+        elif cn in ('COVERAGE4G', 'CHATLUONGVUNGPHU'):
+            alias_display_map_all[c] = 'ChatLuongVungPhu'
+    kpi_display_options_all = [alias_display_map_all.get(c, c) for c in kpi_cols_raw_all]
+    selected_kpi_all_display = st.selectbox(
         "Chọn KPI để phân tích cho tất cả tỉnh",
-        kpi_cols
+        kpi_display_options_all
     )
+    if selected_kpi_all_display == '4G_USR_DL_THP':
+        if '4G_USR_DL_THP' in df.columns:
+            kpi_all = '4G_USR_DL_THP'
+        else:
+            kpi_all = 'ID4G_USR_DL_THP'
+    else:
+        reverse_map_all = {v: k for k, v in alias_display_map_all.items()}
+        if selected_kpi_all_display in reverse_map_all:
+            kpi_all = reverse_map_all[selected_kpi_all_display]
+        else:
+            kpi_all = selected_kpi_all_display
     
     # Lọc ngày - Tính năng loại bỏ ngày bị lỗi
     st.subheader("🔧 Lọc ngày")
     col_filter1, col_filter2 = st.columns(2)
     
     with col_filter1:
-        # Lấy danh sách ngày có dữ liệu
-        all_dates = sorted(df['Ngay7'].dropna().unique())
-        all_dates_str = [str(d) for d in all_dates]
+        # Lấy danh sách ngày có dữ liệu (chuẩn hóa theo datetime để sắp xếp đúng)
+        all_dates_dt = pd.to_datetime(df['Ngay7'], format='%d/%m/%Y', errors='coerce').dropna()
+        all_dates_dt = all_dates_dt.sort_values().unique()
+        # Format ngày theo D/M/Y (bỏ giờ)
+        all_dates_str = [d.strftime('%d/%m/%Y') for d in all_dates_dt]
         
         # Multi-select để chọn ngày cần loại bỏ
         excluded_dates = st.multiselect(
@@ -470,12 +612,11 @@ with tab3:
         )
     
     with col_filter2:
-        # Chọn khoảng ngày để hiển thị
-        if len(all_dates) > 0:
-            # Convert dates for date_input
+        # Chọn khoảng ngày để hiển thị (dựa trên min/max datetime thực tế)
+        if len(all_dates_dt) > 0:
             try:
-                date_min = pd.to_datetime(all_dates[0], format='%d/%m/%Y', errors='coerce')
-                date_max = pd.to_datetime(all_dates[-1], format='%d/%m/%Y', errors='coerce')
+                date_min = pd.to_datetime(all_dates_dt.min(), errors='coerce')
+                date_max = pd.to_datetime(all_dates_dt.max(), errors='coerce')
                 
                 if pd.notna(date_min) and pd.notna(date_max):
                     date_range = st.date_input(
@@ -529,19 +670,19 @@ with tab3:
         
         if all_provinces_data:
             # Tạo DataFrame tổng hợp
-            combined_df = pd.concat(all_provinces_data, ignore_index=True)
-            combined_df['Ngay7'] = combined_df['Ngay7'].dt.strftime('%Y-%m-%d')
+            combined_df = pd.concat(all_provinces_data, ignore_index=True)  # giữ datetime
             
-            # Pivot để có mỗi tỉnh là một cột
+            # Pivot để có mỗi tỉnh là một cột và vẽ bằng Streamlit
             pivot_df = combined_df.pivot_table(
                 index='Ngay7', 
                 columns='Tỉnh', 
                 values=kpi_all,
                 aggfunc='first'
             )
-            
-            # Hiển thị biểu đồ bằng Streamlit
             if len(pivot_df) > 0:
+                # Định dạng index về chuỗi YYYY-MM-DD như trước
+                pivot_df = pivot_df.copy()
+                pivot_df.index = pivot_df.index.strftime('%Y-%m-%d')
                 st.line_chart(pivot_df)
                 
                 # Thông báo nếu có ngày bị loại bỏ
@@ -644,7 +785,7 @@ with tab3:
                         
                         ax.set_title(f'{kpi_all} - Các tỉnh có suy giảm', fontsize=16, fontweight='bold')
                         ax.set_xlabel('Ngày', fontsize=12)
-                        ax.set_ylabel(kpi_all, fontsize=12)
+                        ax.set_ylabel('', fontsize=12)  # Bỏ label trục Y
                         ax.grid(True, alpha=0.3)
                         ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize=8)
                         
@@ -653,6 +794,16 @@ with tab3:
                         ax.xaxis.set_major_formatter(DateFormatter('%d/%m/%Y'))
                         ax.tick_params(axis='x', rotation=45)
                         plt.setp(ax.xaxis.get_majorticklabels(), ha='right')
+                        
+                        # Đảm bảo trục Y luôn hiển thị đầy đủ số khi phóng to
+                        ax.tick_params(axis='y', which='both', labelsize=10)
+                        ax.yaxis.set_minor_locator(plt.NullLocator())  # Tắt minor ticks
+                        # Force hiển thị tối thiểu số tick trên trục Y
+                        ax.yaxis.set_major_locator(MaxNLocator(nbins=10, integer=False))
+                        # Format 2 chữ số thập phân cho trục Y
+                        ax.yaxis.set_major_formatter(FuncFormatter(lambda y, pos: f"{y:.2f}"))
+                        # Tăng margin bên trái để có chỗ hiển thị số (đặc biệt khi có legend bên phải)
+                        fig.subplots_adjust(left=0.10, right=0.85, top=0.93, bottom=0.15)
                         
                         # Tính số ngày và tăng kích thước biểu đồ khi có nhiều ngày
                         all_dates_in_chart = set()
@@ -721,15 +872,11 @@ with tab3:
                                     filtered_all_provinces_data.append(kpi_data[['Ngay7', kpi_all, 'Tỉnh']])
                         
                         if filtered_all_provinces_data:
-                            combined_df = pd.concat(filtered_all_provinces_data, ignore_index=True)
-                            combined_df['Ngay7'] = combined_df['Ngay7'].dt.strftime('%Y-%m-%d')
-                            pivot_df = combined_df.pivot_table(
-                                index='Ngay7', 
-                                columns='Tỉnh', 
-                            values=kpi_all,
-                            aggfunc='first'
-                        )
-                        st.line_chart(pivot_df)
+                            combined_df = pd.concat(filtered_all_provinces_data, ignore_index=True)  # giữ datetime
+                            pivot_df = combined_df.pivot_table(index='Ngay7', columns='Tỉnh', values=kpi_all, aggfunc='first')
+                            pivot_df = pivot_df.copy()
+                            pivot_df.index = pivot_df.index.strftime('%Y-%m-%d')
+                            st.line_chart(pivot_df)
                     
             except Exception as e:
                 st.error(f"❌ Lỗi: {str(e)}")
